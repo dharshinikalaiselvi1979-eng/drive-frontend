@@ -161,6 +161,19 @@ function App() {
     e.target.value = '';
   };
 
+  /* ---------- folder upload: picker (webkitdirectory input) ---------- */
+  const handleFolderInputChange = (e) => {
+    if (e.target.files && e.target.files.length > 0) {
+      const entries = Array.from(e.target.files).map((file) => ({
+        file,
+        // webkitRelativePath looks like "MyFolder/sub/file.txt"
+        relativePath: file.webkitRelativePath || file.name
+      }));
+      uploadFilesWithRelativePaths(entries);
+    }
+    e.target.value = '';
+  };
+
   const requestDelete = (id) => setConfirmDeleteId(id);
 
   const confirmDelete = async () => {
@@ -343,20 +356,114 @@ function App() {
     }
   };
 
-  const handleDrop = (e) => {
+  /* ---------- folder upload: create/reuse nested folders for a relative path ---------- */
+  // pathParts e.g. ['components', 'ui'] (folder names only, no filename)
+  // cache maps "a/b" -> folder id, scoped to a single upload batch
+  const ensureFolderPath = async (pathParts, cache) => {
+    let parentId = currentFolderId;
+    let pathKey = '';
+
+    for (const part of pathParts) {
+      pathKey = pathKey ? `${pathKey}/${part}` : part;
+
+      if (cache.has(pathKey)) {
+        parentId = cache.get(pathKey);
+        continue;
+      }
+
+      const res = await fetch(`${API_URL}/folders`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeader()
+        },
+        body: JSON.stringify({ name: part, parent_id: parentId })
+      });
+      const data = await res.json();
+
+      if (!data.id) {
+        throw new Error(data.error || `Could not create folder "${part}"`);
+      }
+
+      cache.set(pathKey, data.id);
+      parentId = data.id;
+    }
+
+    return parentId;
+  };
+
+  const handleDrop = async (e) => {
     e.preventDefault();
     setIsDragging(false);
+
+    const items = e.dataTransfer.items;
+
+    if (items && items.length > 0 && items[0].webkitGetAsEntry) {
+      const topLevelEntries = Array.from(items)
+        .map((item) => item.webkitGetAsEntry())
+        .filter(Boolean);
+
+      const hasDirectory = topLevelEntries.some((entry) => entry.isDirectory);
+
+      if (hasDirectory) {
+        const filesOut = [];
+        for (const entry of topLevelEntries) {
+          await traverseFileTree(entry, '', filesOut);
+        }
+        uploadFilesWithRelativePaths(filesOut);
+        return;
+      }
+    }
+
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
       uploadFiles(Array.from(e.dataTransfer.files));
     }
   };
 
-  const uploadOneFile = (file) => {
+  // Recursively walks a dropped FileSystemEntry (file or directory),
+  // collecting { file, relativePath } pairs into filesOut.
+  const traverseFileTree = (entry, path, filesOut) => {
+    return new Promise((resolve) => {
+      if (entry.isFile) {
+        entry.file(
+          (file) => {
+            filesOut.push({ file, relativePath: `${path}${file.name}` });
+            resolve();
+          },
+          () => resolve()
+        );
+      } else if (entry.isDirectory) {
+        const dirReader = entry.createReader();
+        const allEntries = [];
+
+        const readBatch = () => {
+          dirReader.readEntries(async (batch) => {
+            if (batch.length === 0) {
+              for (const child of allEntries) {
+                await traverseFileTree(child, `${path}${entry.name}/`, filesOut);
+              }
+              resolve();
+            } else {
+              // directory readers can cap at ~100 entries per call, so keep reading
+              allEntries.push(...batch);
+              readBatch();
+            }
+          }, () => resolve());
+        };
+
+        readBatch();
+      } else {
+        resolve();
+      }
+    });
+  };
+
+  const uploadOneFile = (file, folderId) => {
     return new Promise((resolve, reject) => {
       const formData = new FormData();
       formData.append('file', file);
-      if (currentFolderId) {
-        formData.append('folder_id', currentFolderId);
+      if (folderId) {
+        formData.append('folder_id', folderId);
       }
 
       const xhr = new XMLHttpRequest();
@@ -391,7 +498,7 @@ function App() {
 
     for (const file of fileArray) {
       try {
-        await uploadOneFile(file);
+        await uploadOneFile(file, currentFolderId);
         completed++;
         setUploadProgress(Math.round((completed / fileArray.length) * 100));
       } catch (err) {
@@ -408,6 +515,47 @@ function App() {
     }
 
     fetchFiles();
+  };
+
+  // Uploads files that came with a relative path (folder picker or folder drag-drop),
+  // recreating the folder structure via /folders, then uploading each file into place.
+  const uploadFilesWithRelativePaths = async (entries) => {
+    if (!entries || entries.length === 0) return;
+
+    setUploading(true);
+    setUploadProgress(0);
+
+    const folderCache = new Map();
+    let completed = 0;
+    let failedFiles = [];
+
+    for (const { file, relativePath } of entries) {
+      try {
+        const parts = relativePath.split('/').filter(Boolean);
+        const folderParts = parts.slice(0, -1); // everything except the filename itself
+
+        const folderId = folderParts.length > 0
+          ? await ensureFolderPath(folderParts, folderCache)
+          : currentFolderId;
+
+        await uploadOneFile(file, folderId);
+        completed++;
+        setUploadProgress(Math.round((completed / entries.length) * 100));
+      } catch (err) {
+        failedFiles.push(relativePath);
+      }
+    }
+
+    setUploading(false);
+
+    if (failedFiles.length === 0) {
+      showToast(`Uploaded ${completed} file(s) successfully!`);
+    } else {
+      showToast(`Uploaded ${completed}, failed: ${failedFiles.join(', ')}`, 'error');
+    }
+
+    fetchFiles();
+    fetchFolders();
   };
 
   const isImage = (name) => /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(name);
@@ -729,6 +877,18 @@ function App() {
           />
         </label>
 
+        <label className="new-btn bg-drive-surface text-violet-700 border-[1.5px] border-drive-border rounded-[14px] py-3 px-4.5 text-sm font-bold flex items-center justify-center gap-2 mb-2.5 cursor-pointer">
+          <span className="text-base">📤</span> Upload folder
+          <input
+            type="file"
+            webkitdirectory=""
+            directory=""
+            multiple
+            onChange={handleFolderInputChange}
+            className="hidden"
+          />
+        </label>
+
         <button className="folder-btn bg-drive-surface text-drive-text border-[1.5px] border-drive-border rounded-[14px] py-2.5 px-4.5 text-sm font-bold flex items-center justify-center gap-2 mb-[22px] cursor-pointer" onClick={startCreateFolder}>
           <span className="text-[15px]">📁</span> New folder
         </button>
@@ -808,7 +968,7 @@ function App() {
           {isDragging && (
             <div className="absolute inset-3.5 border-2 border-dashed border-violet-500 rounded-[20px] bg-violet-600/[0.06] flex flex-col items-center justify-center z-40">
               <div className="text-[34px] mb-2.5 animate-[floatSlow_2s_ease-in-out_infinite]">⬆️</div>
-              <div className="font-heading text-[17px] font-bold text-violet-700">Drop files to upload</div>
+              <div className="font-heading text-[17px] font-bold text-violet-700">Drop files or a folder to upload</div>
             </div>
           )}
 
@@ -954,7 +1114,7 @@ function App() {
                     ? 'Click the ☆ on any file to pin it here.'
                     : searchTerm
                       ? 'Try a different search term.'
-                      : 'Drag and drop files here, or click "New upload" to get started.'}
+                      : 'Drag and drop files or a folder here, or click "New upload" / "Upload folder" to get started.'}
               </p>
             </div>
           ) : viewMode === 'grid' ? (
