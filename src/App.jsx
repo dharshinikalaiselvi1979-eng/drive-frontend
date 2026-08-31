@@ -53,6 +53,14 @@ function App() {
     }, 3500);
   };
 
+  // Keep Render free-tier backend alive — ping every 10 minutes so it never sleeps
+  useEffect(() => {
+    const ping = () => fetch(`${API_URL}/`).catch(() => {});
+    ping(); // immediate warm-up on page load
+    const interval = setInterval(ping, 10 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, []);
+
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
