@@ -107,7 +107,7 @@ function App() {
 
   const fetchFolders = async () => {
     try {
-      const url = (activeNav === 'starred')
+      const url = (activeNav === 'starred' || activeNav === 'recent')
         ? `${API_URL}/folders?all=true`
         : currentFolderId
         ? `${API_URL}/folders?parent_id=${currentFolderId}`
@@ -946,6 +946,9 @@ function App() {
     ? trashFolders.filter((f) => f.name.toLowerCase().includes(searchTerm.toLowerCase()))
     : (activeNav === 'drive' && !searchTerm) ? folders
     : (activeNav === 'starred' && !searchTerm) ? folders.filter((f) => f.starred)
+    : (activeNav === 'recent') ? [...folders]
+        .filter((f) => f.name.toLowerCase().includes(searchTerm.toLowerCase()))
+        .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
     : [];
   const nothingToShow = isTrashView
     ? visibleFiles.length === 0 && visibleFolders.length === 0
