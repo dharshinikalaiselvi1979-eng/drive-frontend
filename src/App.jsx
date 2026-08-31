@@ -35,8 +35,13 @@ function App() {
   const [currentFolderId, setCurrentFolderId] = useState(null);
   const [breadcrumb, setBreadcrumb] = useState([]);
   const [trashFiles, setTrashFiles] = useState([]);
+  const [trashFolders, setTrashFolders] = useState([]);
+  /* allFiles = ALL user files across every folder, used for stats only */
+  const [allFiles, setAllFiles] = useState([]);
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
+  const [renamingFolderId, setRenamingFolderId] = useState(null);
+  const [renameFolderValue, setRenameFolderValue] = useState('');
 
   const authHeader = () => ({ Authorization: `Bearer ${session.access_token}` });
 
@@ -69,6 +74,7 @@ function App() {
       fetchFolders();
       fetchBreadcrumb();
     }
+    fetchAllFilesStats();
     setSelectedIds(new Set());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, activeNav, currentFolderId]);
@@ -76,12 +82,14 @@ function App() {
   const fetchFiles = async () => {
     setLoadingFiles(true);
     try {
-      const url = currentFolderId
+      const url = (activeNav === 'recent' || activeNav === 'starred')
+        ? `${API_URL}/files?all=true`
+        : currentFolderId
         ? `${API_URL}/files?folder_id=${currentFolderId}`
         : `${API_URL}/files`;
       const res = await fetch(url, { headers: authHeader() });
       const data = await res.json();
-      setFiles(data);
+      setFiles(Array.isArray(data) ? data : []);
     } catch (err) {
       showToast('Failed to load files: ' + err.message, 'error');
     } finally {
@@ -91,7 +99,9 @@ function App() {
 
   const fetchFolders = async () => {
     try {
-      const url = currentFolderId
+      const url = (activeNav === 'starred')
+        ? `${API_URL}/folders?all=true`
+        : currentFolderId
         ? `${API_URL}/folders?parent_id=${currentFolderId}`
         : `${API_URL}/folders`;
       const res = await fetch(url, { headers: authHeader() });
@@ -116,12 +126,28 @@ function App() {
     }
   };
 
+  /* Fetch ALL files (across every folder) purely for the storage stats */
+  const fetchAllFilesStats = async () => {
+    try {
+      const res = await fetch(`${API_URL}/files?all=true`, { headers: authHeader() });
+      const data = await res.json();
+      setAllFiles(Array.isArray(data) ? data : []);
+    } catch {
+      /* stats are non-critical, fail silently */
+    }
+  };
+
   const fetchTrash = async () => {
     setLoadingFiles(true);
     try {
-      const res = await fetch(`${API_URL}/files/trash`, { headers: authHeader() });
-      const data = await res.json();
-      setTrashFiles(Array.isArray(data) ? data : []);
+      const [filesRes, foldersRes] = await Promise.all([
+        fetch(`${API_URL}/files/trash`, { headers: authHeader() }),
+        fetch(`${API_URL}/folders/trash`, { headers: authHeader() })
+      ]);
+      const filesData = await filesRes.json();
+      const foldersData = await foldersRes.json();
+      setTrashFiles(Array.isArray(filesData) ? filesData : []);
+      setTrashFolders(Array.isArray(foldersData) ? foldersData : []);
     } catch (err) {
       showToast('Failed to load trash: ' + err.message, 'error');
     } finally {
@@ -193,6 +219,7 @@ function App() {
           return next;
         });
         fetchFiles();
+        fetchAllFilesStats();
       } else {
         showToast('Delete failed: ' + data.error, 'error');
       }
@@ -222,6 +249,7 @@ function App() {
     setSelectedIds(new Set());
     showToast(`Moved ${deleted} file${deleted !== 1 ? 's' : ''} to trash`);
     fetchFiles();
+    fetchAllFilesStats();
   };
 
   const restoreFile = async (id) => {
@@ -234,6 +262,7 @@ function App() {
       if (data.success) {
         showToast('File restored');
         fetchTrash();
+        fetchAllFilesStats();
       } else {
         showToast('Restore failed: ' + data.error, 'error');
       }
@@ -252,6 +281,7 @@ function App() {
       if (data.success) {
         showToast('File permanently deleted');
         fetchTrash();
+        fetchAllFilesStats();
       } else {
         showToast('Permanent delete failed: ' + data.error, 'error');
       }
@@ -311,6 +341,114 @@ function App() {
       }
     } catch (err) {
       showToast('Star error: ' + err.message, 'error');
+    }
+  };
+
+  const toggleFolderStar = async (folder) => {
+    try {
+      const res = await fetch(`${API_URL}/folders/${folder.id}/star`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeader()
+        },
+        body: JSON.stringify({ starred: !folder.starred })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setFolders((prev) =>
+          prev.map((f) => (f.id === folder.id ? { ...f, starred: data.record.starred } : f))
+        );
+      } else {
+        showToast('Star failed: ' + data.error, 'error');
+      }
+    } catch (err) {
+      showToast('Star error: ' + err.message, 'error');
+    }
+  };
+
+  const startRenameFolder = (folder) => {
+    setRenamingFolderId(folder.id);
+    setRenameFolderValue(folder.name);
+  };
+
+  const saveRenameFolder = async (id) => {
+    const trimmed = renameFolderValue.trim();
+    setRenamingFolderId(null);
+    if (!trimmed) return;
+
+    try {
+      const res = await fetch(`${API_URL}/folders/${id}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeader()
+        },
+        body: JSON.stringify({ name: trimmed })
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast('Folder renamed');
+        fetchFolders();
+      } else {
+        showToast('Rename failed: ' + data.error, 'error');
+      }
+    } catch (err) {
+      showToast('Rename error: ' + err.message, 'error');
+    }
+  };
+
+  const trashFolder = async (folderId) => {
+    try {
+      const res = await fetch(`${API_URL}/folders/${folderId}`, {
+        method: 'DELETE',
+        headers: authHeader()
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast('Folder moved to trash');
+        fetchFolders();
+      } else {
+        showToast('Delete failed: ' + data.error, 'error');
+      }
+    } catch (err) {
+      showToast('Delete error: ' + err.message, 'error');
+    }
+  };
+
+  const restoreFolder = async (id) => {
+    try {
+      const res = await fetch(`${API_URL}/folders/${id}/restore`, {
+        method: 'PATCH',
+        headers: authHeader()
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast('Folder restored');
+        fetchTrash();
+      } else {
+        showToast('Restore failed: ' + data.error, 'error');
+      }
+    } catch (err) {
+      showToast('Restore error: ' + err.message, 'error');
+    }
+  };
+
+  const permanentlyDeleteFolder = async (id) => {
+    try {
+      const res = await fetch(`${API_URL}/folders/${id}/permanent`, {
+        method: 'DELETE',
+        headers: authHeader()
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast('Folder permanently deleted');
+        fetchTrash();
+      } else {
+        showToast('Permanent delete failed: ' + data.error, 'error');
+      }
+    } catch (err) {
+      showToast('Permanent delete error: ' + err.message, 'error');
     }
   };
 
@@ -515,6 +653,7 @@ function App() {
     }
 
     fetchFiles();
+    fetchAllFilesStats();
   };
 
   // Uploads files that came with a relative path (folder picker or folder drag-drop),
@@ -556,9 +695,13 @@ function App() {
 
     fetchFiles();
     fetchFolders();
+    fetchAllFilesStats();
   };
 
-  const isImage = (name) => /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(name);
+  const isImage = (name) => /\.(jpg|jpeg|png|gif|webp|svg|bmp|ico|tiff)$/i.test(name);
+  const isVideo = (name) => /\.(mp4|webm|ogg|mov)$/i.test(name);
+  const isAudio = (name) => /\.(mp3|wav|ogg|aac|flac|m4a)$/i.test(name);
+  const isPdf = (name) => /\.pdf$/i.test(name);
 
   /* bg is now a Tailwind className instead of a hex string */
   const getFileMeta = (name) => {
@@ -568,9 +711,9 @@ function App() {
     if (['xls', 'xlsx', 'csv'].includes(ext)) return { emoji: '📊', bg: 'bg-chip-green' };
     if (['zip', 'rar', '7z'].includes(ext)) return { emoji: '🗜️', bg: 'bg-chip-orange' };
     if (['mp3', 'wav'].includes(ext)) return { emoji: '🎵', bg: 'bg-pink-100' };
-    if (['mp4', 'mov', 'avi'].includes(ext)) return { emoji: '🎬', bg: 'bg-chip-violet' };
+    if (['mp4', 'mov', 'avi'].includes(ext)) return { emoji: '🎬', bg: 'bg-chip-teal' };
     if (['js', 'jsx', 'ts', 'tsx', 'json', 'html', 'css'].includes(ext)) return { emoji: '💻', bg: 'bg-chip-blue' };
-    return { emoji: '📄', bg: 'bg-chip-violet' };
+    return { emoji: '📄', bg: 'bg-chip-teal' };
   };
 
   const getFilteredAndSortedFiles = () => {
@@ -608,7 +751,7 @@ function App() {
 
   const clearSelection = () => setSelectedIds(new Set());
 
-  const totalStorage = files.reduce((sum, f) => sum + f.size, 0);
+  const totalStorage = allFiles.reduce((sum, f) => sum + f.size, 0);
   const STORAGE_LIMIT = 1024 * 1024 * 1024;
   const storagePercent = Math.min(100, (totalStorage / STORAGE_LIMIT) * 100);
 
@@ -629,42 +772,42 @@ function App() {
       * { box-sizing: border-box; }
 
       .file-tile, .file-row { transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.2s ease, background-color 0.15s ease; }
-      .file-tile:hover { transform: translateY(-4px); border-color: #C9B6F5; box-shadow: 0 14px 28px rgba(124,58,237,0.16); }
+      .file-tile:hover { transform: translateY(-4px); border-color: #5eead4; box-shadow: 0 14px 28px rgba(13,148,136,0.16); }
       .file-tile:hover .select-check, .file-tile.selected .select-check { opacity: 1; }
-      .file-row:hover { background-color: #FAF7FF; }
-      .file-row.selected { background-color: #F3E8FF; }
+      .file-row:hover { background-color: #f0fdfa; }
+      .file-row.selected { background-color: #ccfbf1; }
 
       .select-check { opacity: 0; transition: opacity 0.15s ease, background-color 0.15s ease, border-color 0.15s ease; cursor: pointer; }
       .select-check.checked { opacity: 1 !important; }
 
       .delete-btn { transition: background-color 0.15s ease, color 0.15s ease; }
       .delete-btn:hover { background-color: #EF4444; color: #fff; }
-      .rename-btn:hover { color: #7C3AED; }
+      .rename-btn:hover { color: #0d9488; }
       .restore-btn:hover { background-color: #10B981; color: #fff; }
 
       .new-btn { transition: transform 0.15s ease, box-shadow 0.15s ease; cursor: pointer; }
-      .new-btn:hover { transform: translateY(-1px); box-shadow: 0 10px 24px rgba(124,58,237,0.38); }
+      .new-btn:hover { transform: translateY(-1px); box-shadow: 0 10px 24px rgba(13,148,136,0.38); }
 
-      .folder-btn:hover { border-color: #C9B6F5; background-color: #F3E8FF; }
+      .folder-btn:hover { border-color: #5eead4; background-color: #ccfbf1; }
 
-      .logout-btn:hover { border-color: #7C3AED; color: #7C3AED; background-color: #F3E8FF; }
+      .logout-btn:hover { border-color: #0d9488; color: #0d9488; background-color: #ccfbf1; }
       .signin-btn { transition: transform 0.15s ease, box-shadow 0.2s ease; cursor: pointer; }
-      .signin-btn:hover { transform: translateY(-1px); box-shadow: 0 12px 26px rgba(124,58,237,0.4); }
+      .signin-btn:hover { transform: translateY(-1px); box-shadow: 0 12px 26px rgba(13,148,136,0.4); }
 
       .nav-item { transition: background-color 0.15s ease, color 0.15s ease; cursor: pointer; }
-      .nav-item:hover { background-color: #F3E8FF; color: #6D28D9; }
+      .nav-item:hover { background-color: #ccfbf1; color: #6D28D9; }
 
       .view-toggle-btn { transition: background-color 0.15s ease, color 0.15s ease; cursor: pointer; }
-      .view-toggle-btn:hover { background-color: #F3E8FF; color: #7C3AED; }
+      .view-toggle-btn:hover { background-color: #ccfbf1; color: #0d9488; }
 
       .search-pill { transition: box-shadow 0.15s ease, border-color 0.15s ease, background-color 0.15s ease; }
-      .search-pill:focus-within { border-color: #C9B6F5; box-shadow: 0 0 0 4px rgba(124,58,237,0.12); background-color: #fff; }
+      .search-pill:focus-within { border-color: #5eead4; box-shadow: 0 0 0 4px rgba(13,148,136,0.12); background-color: #fff; }
 
       .sort-pill { transition: border-color 0.15s ease; cursor: pointer; }
-      .sort-pill:hover, .sort-pill:focus { border-color: #C9B6F5; outline: none; }
+      .sort-pill:hover, .sort-pill:focus { border-color: #5eead4; outline: none; }
 
       .avatar-ring { transition: box-shadow 0.15s ease, transform 0.15s ease; cursor: pointer; }
-      .avatar-ring:hover { box-shadow: 0 0 0 4px rgba(124,58,237,0.18); transform: translateY(-1px); }
+      .avatar-ring:hover { box-shadow: 0 0 0 4px rgba(13,148,136,0.18); transform: translateY(-1px); }
 
       .bulk-bar-clear:hover { text-decoration: underline; }
 
@@ -688,7 +831,7 @@ function App() {
       ::-webkit-scrollbar { width: 10px; height: 10px; }
       ::-webkit-scrollbar-track { background: transparent; }
       ::-webkit-scrollbar-thumb { background: #DCCFF3; border-radius: 6px; }
-      ::-webkit-scrollbar-thumb:hover { background: #C9B6F5; }
+      ::-webkit-scrollbar-thumb:hover { background: #5eead4; }
     `}</style>
   );
 
@@ -700,7 +843,7 @@ function App() {
         <div className="flex-none w-[46%] bg-drive-gradient text-white py-12 px-14 flex flex-col justify-between">
           <div className="flex items-center gap-2.5">
             <span className="text-2xl">☁️</span>
-            <span className="font-heading text-[19px] font-bold text-white">CloudDrive</span>
+            <span className="font-heading text-[19px] font-bold text-white">StackDrive</span>
           </div>
 
           <div className="max-w-[480px]">
@@ -711,7 +854,7 @@ function App() {
             <h1 className="font-heading text-[46px] leading-[1.1] font-extrabold mt-0 mb-5">
               Your files,
               <br />
-              <span className="text-fuchsia-200">organized beautifully.</span>
+              <span className="text-teal-200">organized beautifully.</span>
             </h1>
             <p className="text-[15px] leading-relaxed text-white/85 mb-6 max-w-[420px]">
               Upload, search, and share anything in seconds. One home for
@@ -765,7 +908,7 @@ function App() {
               />
             </div>
 
-            <button onClick={handleAuth} className="signin-btn w-full bg-drive-gradient text-white border-none rounded-xl py-3.5 px-5 text-[15px] font-bold mt-6 flex items-center justify-center gap-2 shadow-[0_10px_24px_rgba(124,58,237,0.32)]">
+            <button onClick={handleAuth} className="signin-btn w-full bg-drive-gradient text-white border-none rounded-xl py-3.5 px-5 text-[15px] font-bold mt-6 flex items-center justify-center gap-2 shadow-[0_10px_24px_rgba(13,148,136,0.32)]">
               {authMode === 'login' ? 'Sign In' : 'Sign Up'} <span>→</span>
             </button>
 
@@ -774,7 +917,7 @@ function App() {
             <p className="text-[13px] text-drive-muted text-center mt-5">
               {authMode === 'login' ? "Don't have an account? " : 'Already have an account? '}
               <span
-                className="switch-link text-violet-600 cursor-pointer font-bold"
+                className="switch-link text-teal-600 cursor-pointer font-bold"
                 onClick={() => setAuthMode(authMode === 'login' ? 'signup' : 'login')}
               >
                 {authMode === 'login' ? 'Create one free' : 'Log in'}
@@ -791,9 +934,13 @@ function App() {
   const visibleFiles = isTrashView
     ? trashFiles.filter((f) => f.name.toLowerCase().includes(searchTerm.toLowerCase()))
     : getNavFilteredFiles(getFilteredAndSortedFiles());
-  const visibleFolders = (activeNav === 'drive' && !searchTerm) ? folders : [];
+  const visibleFolders = isTrashView
+    ? trashFolders.filter((f) => f.name.toLowerCase().includes(searchTerm.toLowerCase()))
+    : (activeNav === 'drive' && !searchTerm) ? folders
+    : (activeNav === 'starred' && !searchTerm) ? folders.filter((f) => f.starred)
+    : [];
   const nothingToShow = isTrashView
-    ? visibleFiles.length === 0
+    ? visibleFiles.length === 0 && visibleFolders.length === 0
     : visibleFiles.length === 0 && visibleFolders.length === 0;
 
   return (
@@ -804,8 +951,8 @@ function App() {
         {toasts.map((t) => (
           <div
             key={t.id}
-            className={`toast bg-drive-surface border-[1.5px] rounded-xl py-2.5 px-4.5 text-[13px] font-medium shadow-[0_8px_22px_rgba(124,58,237,0.16)] max-w-[320px] ${
-              t.type === 'error' ? 'border-red-500 text-red-500' : 'border-[#C9B6F5] text-violet-700'
+            className={`toast bg-drive-surface border-[1.5px] rounded-xl py-2.5 px-4.5 text-[13px] font-medium shadow-[0_8px_22px_rgba(13,148,136,0.16)] max-w-[320px] ${
+              t.type === 'error' ? 'border-red-500 text-red-500' : 'border-[#5eead4] text-teal-700'
             }`}
           >
             {t.text}
@@ -844,10 +991,29 @@ function App() {
             <div className="flex-1 bg-drive-bg rounded-[14px] flex items-center justify-center overflow-hidden min-h-[260px]">
               {isImage(previewFile.name) && previewFile.url ? (
                 <img src={previewFile.url} alt={previewFile.name} className="max-w-full max-h-[60vh] object-contain" />
+              ) : isPdf(previewFile.name) && previewFile.url ? (
+                <iframe src={previewFile.url} title={previewFile.name} className="w-full h-[60vh] border-none rounded-[14px]" />
+              ) : isVideo(previewFile.name) && previewFile.url ? (
+                <video src={previewFile.url} controls className="max-w-full max-h-[60vh] rounded-lg">
+                  Your browser does not support the video tag.
+                </video>
+              ) : isAudio(previewFile.name) && previewFile.url ? (
+                <div className="flex flex-col items-center gap-4 py-8">
+                  <span className="text-[64px]">🎧</span>
+                  <audio src={previewFile.url} controls className="w-[320px]">
+                    Your browser does not support the audio tag.
+                  </audio>
+                </div>
+              ) : previewFile.url ? (
+                <div className="flex flex-col items-center gap-3 py-6">
+                  <span className="text-[48px]">{getFileMeta(previewFile.name).emoji}</span>
+                  <p className="text-drive-muted text-[13px]">Preview not supported for this file type</p>
+                  <a href={previewFile.url} target="_blank" rel="noopener noreferrer" className="text-teal-600 text-[13px] font-bold no-underline hover:underline">Download to view ↓</a>
+                </div>
               ) : (
                 <div className="flex flex-col items-center gap-2">
                   <span className="text-[48px]">{getFileMeta(previewFile.name).emoji}</span>
-                  <p className="text-drive-muted text-[13px]">No preview available</p>
+                  <p className="text-drive-muted text-[13px]">File URL unavailable</p>
                 </div>
               )}
             </div>
@@ -864,10 +1030,10 @@ function App() {
       <div className="w-[264px] flex-none bg-drive-surface border-r border-drive-border flex flex-col py-[22px] px-4">
         <div className="flex items-center gap-2.5 px-2 mb-[22px]">
           <span className="text-[22px]">☁️</span>
-          <span className="font-heading text-[19px] font-bold text-drive-text">CloudDrive</span>
+          <span className="font-heading text-[19px] font-bold text-drive-text">StackDrive</span>
         </div>
 
-        <label className="new-btn bg-drive-gradient text-white border-none rounded-[14px] py-3.5 px-4.5 text-sm font-bold flex items-center justify-center gap-2 mb-2.5 shadow-[0_6px_18px_rgba(124,58,237,0.30)]">
+        <label className="new-btn bg-drive-gradient text-white border-none rounded-[14px] py-3.5 px-4.5 text-sm font-bold flex items-center justify-center gap-2 mb-2.5 shadow-[0_6px_18px_rgba(13,148,136,0.30)]">
           <span className="text-base">＋</span> New upload
           <input
             type="file"
@@ -877,7 +1043,7 @@ function App() {
           />
         </label>
 
-        <label className="new-btn bg-drive-surface text-violet-700 border-[1.5px] border-drive-border rounded-[14px] py-3 px-4.5 text-sm font-bold flex items-center justify-center gap-2 mb-2.5 cursor-pointer">
+        <label className="new-btn bg-drive-surface text-teal-700 border-[1.5px] border-drive-border rounded-[14px] py-3 px-4.5 text-sm font-bold flex items-center justify-center gap-2 mb-2.5 cursor-pointer">
           <span className="text-base">📤</span> Upload folder
           <input
             type="file"
@@ -895,26 +1061,26 @@ function App() {
 
         <div className="flex flex-col gap-[3px] flex-1">
           <div
-            className={`nav-item flex items-center gap-3 py-2.5 px-3 rounded-xl text-sm font-medium cursor-pointer ${activeNav === 'drive' ? 'bg-chip-violet text-violet-700 font-bold' : 'text-drive-muted'}`}
+            className={`nav-item flex items-center gap-3 py-2.5 px-3 rounded-xl text-sm font-medium cursor-pointer ${activeNav === 'drive' ? 'bg-chip-teal text-teal-700 font-bold' : 'text-drive-muted'}`}
             onClick={() => { setActiveNav('drive'); setCurrentFolderId(null); }}
           >
             <span className="text-[15px]">🏠</span> My Drive
           </div>
           <div
-            className={`nav-item flex items-center gap-3 py-2.5 px-3 rounded-xl text-sm font-medium cursor-pointer ${activeNav === 'recent' ? 'bg-chip-violet text-violet-700 font-bold' : 'text-drive-muted'}`}
-            onClick={() => setActiveNav('recent')}
+            className={`nav-item flex items-center gap-3 py-2.5 px-3 rounded-xl text-sm font-medium cursor-pointer ${activeNav === 'recent' ? 'bg-chip-teal text-teal-700 font-bold' : 'text-drive-muted'}`}
+            onClick={() => { setActiveNav('recent'); setCurrentFolderId(null); }}
           >
             <span className="text-[15px]">🕒</span> Recent
           </div>
           <div
-            className={`nav-item flex items-center gap-3 py-2.5 px-3 rounded-xl text-sm font-medium cursor-pointer ${activeNav === 'starred' ? 'bg-chip-violet text-violet-700 font-bold' : 'text-drive-muted'}`}
-            onClick={() => setActiveNav('starred')}
+            className={`nav-item flex items-center gap-3 py-2.5 px-3 rounded-xl text-sm font-medium cursor-pointer ${activeNav === 'starred' ? 'bg-chip-teal text-teal-700 font-bold' : 'text-drive-muted'}`}
+            onClick={() => { setActiveNav('starred'); setCurrentFolderId(null); }}
           >
             <span className="text-[15px]">⭐</span> Starred
           </div>
           <div
-            className={`nav-item flex items-center gap-3 py-2.5 px-3 rounded-xl text-sm font-medium cursor-pointer ${activeNav === 'trash' ? 'bg-chip-violet text-violet-700 font-bold' : 'text-drive-muted'}`}
-            onClick={() => setActiveNav('trash')}
+            className={`nav-item flex items-center gap-3 py-2.5 px-3 rounded-xl text-sm font-medium cursor-pointer ${activeNav === 'trash' ? 'bg-chip-teal text-teal-700 font-bold' : 'text-drive-muted'}`}
+            onClick={() => { setActiveNav('trash'); setCurrentFolderId(null); }}
           >
             <span className="text-[15px]">🗑️</span> Trash
           </div>
@@ -949,7 +1115,7 @@ function App() {
               {initials}
             </div>
             {userMenuOpen && (
-              <div className="absolute top-12 right-0 bg-drive-surface border border-drive-border rounded-[14px] p-3.5 min-w-[210px] shadow-[0_12px_32px_rgba(124,58,237,0.16)] z-50">
+              <div className="absolute top-12 right-0 bg-drive-surface border border-drive-border rounded-[14px] p-3.5 min-w-[210px] shadow-[0_12px_32px_rgba(13,148,136,0.16)] z-50">
                 <div className="text-[13px] text-drive-muted mb-2.5 break-all">{session.user.email}</div>
                 <button onClick={handleLogout} className="logout-btn w-full bg-transparent text-drive-text border border-drive-border rounded-[10px] py-2.5 px-3 text-[13px] font-semibold cursor-pointer">
                   Log out
@@ -966,9 +1132,9 @@ function App() {
           onDrop={handleDrop}
         >
           {isDragging && (
-            <div className="absolute inset-3.5 border-2 border-dashed border-violet-500 rounded-[20px] bg-violet-600/[0.06] flex flex-col items-center justify-center z-40">
+            <div className="absolute inset-3.5 border-2 border-dashed border-teal-500 rounded-[20px] bg-teal-600/[0.06] flex flex-col items-center justify-center z-40">
               <div className="text-[34px] mb-2.5 animate-[floatSlow_2s_ease-in-out_infinite]">⬆️</div>
-              <div className="font-heading text-[17px] font-bold text-violet-700">Drop files or a folder to upload</div>
+              <div className="font-heading text-[17px] font-bold text-teal-700">Drop files or a folder to upload</div>
             </div>
           )}
 
@@ -1015,7 +1181,7 @@ function App() {
                   if (e.key === 'Enter') saveNewFolder();
                   if (e.key === 'Escape') setCreatingFolder(false);
                 }}
-                className="w-full bg-chip-violet border border-violet-500 rounded-lg py-1.5 px-2.5 text-drive-text text-[13px] font-semibold"
+                className="w-full bg-chip-teal border border-teal-500 rounded-lg py-1.5 px-2.5 text-drive-text text-[13px] font-semibold"
               />
             </div>
           )}
@@ -1023,8 +1189,14 @@ function App() {
           <div className="flex justify-between items-center mb-4 flex-wrap gap-2.5">
             <span className="text-[13px] text-drive-muted font-medium">
               {isTrashView
-                ? `${trashFiles.length} file${trashFiles.length !== 1 ? 's' : ''} in trash`
-                : `${files.length} file${files.length !== 1 ? 's' : ''} · ${formatSize(totalStorage)}`}
+                ? `${trashFiles.length + trashFolders.length} item${(trashFiles.length + trashFolders.length) !== 1 ? 's' : ''} in trash`
+                : (() => {
+                    const fCount = visibleFiles.length;
+                    const dCount = visibleFolders.length;
+                    const viewSize = visibleFiles.reduce((sum, f) => sum + (f.size || 0), 0);
+                    const folderStr = dCount > 0 ? `, ${dCount} folder${dCount !== 1 ? 's' : ''}` : '';
+                    return `${fCount} file${fCount !== 1 ? 's' : ''}${folderStr} · ${formatSize(viewSize)}`;
+                  })()}
               {uploading && ` · Uploading ${uploadProgress}%`}
             </span>
             <div className="flex items-center gap-2.5">
@@ -1043,14 +1215,14 @@ function App() {
               <div className="flex border border-drive-border rounded-[10px] overflow-hidden">
                 <button
                   onClick={() => setViewMode('grid')}
-                  className={`view-toggle-btn border-none py-2.5 px-3.5 text-sm cursor-pointer ${viewMode === 'grid' ? 'bg-chip-violet text-violet-700' : 'bg-transparent text-drive-muted'}`}
+                  className={`view-toggle-btn border-none py-2.5 px-3.5 text-sm cursor-pointer ${viewMode === 'grid' ? 'bg-chip-teal text-teal-700' : 'bg-transparent text-drive-muted'}`}
                   title="Grid view"
                 >
                   ▦
                 </button>
                 <button
                   onClick={() => setViewMode('list')}
-                  className={`view-toggle-btn border-none py-2.5 px-3.5 text-sm cursor-pointer ${viewMode === 'list' ? 'bg-chip-violet text-violet-700' : 'bg-transparent text-drive-muted'}`}
+                  className={`view-toggle-btn border-none py-2.5 px-3.5 text-sm cursor-pointer ${viewMode === 'list' ? 'bg-chip-teal text-teal-700' : 'bg-transparent text-drive-muted'}`}
                   title="List view"
                 >
                   ☰
@@ -1060,10 +1232,10 @@ function App() {
           </div>
 
           {!isTrashView && selectedIds.size > 0 && (
-            <div className="flex items-center justify-between bg-chip-violet border border-[#E4D3FA] rounded-[14px] py-3 px-4.5 mb-4">
-              <span className="text-[13px] font-bold text-violet-700">{selectedIds.size} selected</span>
+            <div className="flex items-center justify-between bg-chip-teal border border-[#E4D3FA] rounded-[14px] py-3 px-4.5 mb-4">
+              <span className="text-[13px] font-bold text-teal-700">{selectedIds.size} selected</span>
               <div className="flex gap-3.5 items-center">
-                <span className="bulk-bar-clear text-[13px] text-violet-700 cursor-pointer font-semibold" onClick={clearSelection}>
+                <span className="bulk-bar-clear text-[13px] text-teal-700 cursor-pointer font-semibold" onClick={clearSelection}>
                   Clear
                 </span>
                 <button onClick={bulkDelete} disabled={bulkDeleting} className="bg-red-500 text-white border-none rounded-[10px] py-2 px-4 text-[13px] font-bold cursor-pointer">
@@ -1095,26 +1267,30 @@ function App() {
             )
           ) : nothingToShow ? (
             <div className="text-center py-[90px] px-5 border-[1.5px] border-dashed border-drive-border rounded-[20px]">
-              <div className="text-[42px] mb-3 w-[84px] h-[84px] rounded-full bg-chip-violet flex items-center justify-center mx-auto">
-                {isTrashView ? '🗑️' : activeNav === 'starred' ? '⭐' : searchTerm ? '🔎' : '🗂️'}
+              <div className="text-[42px] mb-3 w-[84px] h-[84px] rounded-full bg-chip-teal flex items-center justify-center mx-auto">
+                {isTrashView ? '🗑️' : activeNav === 'starred' ? '⭐' : activeNav === 'recent' ? '🕒' : searchTerm ? '🔎' : '🗂️'}
               </div>
               <p className="font-heading text-drive-text mb-1 text-base font-bold">
                 {isTrashView
                   ? 'Trash is empty'
                   : activeNav === 'starred'
                     ? 'No starred files yet'
-                    : searchTerm
-                      ? 'No files match your search'
-                      : 'No files yet'}
+                    : activeNav === 'recent'
+                      ? 'No recent files'
+                      : searchTerm
+                        ? 'No files match your search'
+                        : 'No files yet'}
               </p>
               <p className="text-drive-muted text-[13px]">
                 {isTrashView
                   ? 'Deleted files show up here and can be restored.'
                   : activeNav === 'starred'
                     ? 'Click the ☆ on any file to pin it here.'
-                    : searchTerm
-                      ? 'Try a different search term.'
-                      : 'Drag and drop files or a folder here, or click "New upload" / "Upload folder" to get started.'}
+                    : activeNav === 'recent'
+                      ? 'Files you upload will appear here automatically.'
+                      : searchTerm
+                        ? 'Try a different search term.'
+                        : 'Drag and drop files or a folder here, or click "New upload" / "Upload folder" to get started.'}
               </p>
             </div>
           ) : viewMode === 'grid' ? (
@@ -1123,14 +1299,53 @@ function App() {
                 <div
                   key={`folder-${folder.id}`}
                   className="file-tile fade-in bg-drive-surface border border-drive-border rounded-2xl overflow-hidden flex flex-col relative"
-                  onClick={() => openFolder(folder)}
+                  onClick={() => !isTrashView && openFolder(folder)}
                 >
-                  <div className="h-[112px] flex items-center justify-center cursor-pointer bg-chip-violet">
+                  <div className={`h-[112px] flex items-center justify-center cursor-pointer ${isTrashView ? 'bg-pink-100' : 'bg-chip-teal'}`}>
                     <span className="text-[38px]">📁</span>
                   </div>
                   <div className="p-3 px-3.5">
-                    <span className="text-drive-text no-underline text-[13px] font-semibold block whitespace-nowrap overflow-hidden text-ellipsis" title={folder.name}>{folder.name}</span>
+                    {renamingFolderId === folder.id ? (
+                      <input
+                        autoFocus
+                        value={renameFolderValue}
+                        onChange={(e) => setRenameFolderValue(e.target.value)}
+                        onClick={(e) => e.stopPropagation()}
+                        onBlur={() => saveRenameFolder(folder.id)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') saveRenameFolder(folder.id);
+                          if (e.key === 'Escape') setRenamingFolderId(null);
+                        }}
+                        className="w-full bg-chip-teal border border-teal-500 rounded-lg py-1.5 px-2.5 text-drive-text text-[13px] font-semibold"
+                      />
+                    ) : (
+                      <span className="text-drive-text no-underline text-[13px] font-semibold block whitespace-nowrap overflow-hidden text-ellipsis" title={folder.name}>{folder.name}</span>
+                    )}
                     <div className="text-drive-muted text-[11px] mt-1">Folder</div>
+                  </div>
+                  <div className="absolute top-2 right-2 flex gap-1">
+                    {isTrashView ? (
+                      <>
+                        <button onClick={(e) => { e.stopPropagation(); restoreFolder(folder.id); }} className="restore-btn bg-[rgba(30,27,46,0.55)] text-white border-none rounded-lg py-1.5 px-1.5 text-xs cursor-pointer" title="Restore">
+                          ♻️
+                        </button>
+                        <button onClick={(e) => { e.stopPropagation(); permanentlyDeleteFolder(folder.id); }} className="delete-btn bg-[rgba(30,27,46,0.55)] text-white border-none rounded-lg py-1.5 px-1.5 text-xs cursor-pointer" title="Delete forever">
+                          ❌
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button onClick={(e) => { e.stopPropagation(); toggleFolderStar(folder); }} className="star-btn bg-[rgba(30,27,46,0.55)] text-white border-none rounded-lg py-1.5 px-1.5 text-xs cursor-pointer" title={folder.starred ? 'Unstar' : 'Star'}>
+                          {folder.starred ? '⭐' : '☆'}
+                        </button>
+                        <button onClick={(e) => { e.stopPropagation(); startRenameFolder(folder); }} className="rename-btn bg-[rgba(30,27,46,0.55)] text-white border-none rounded-lg py-1.5 px-1.5 text-xs cursor-pointer" title="Rename">
+                          ✏️
+                        </button>
+                        <button onClick={(e) => { e.stopPropagation(); trashFolder(folder.id); }} className="delete-btn bg-[rgba(30,27,46,0.55)] text-white border-none rounded-lg py-1.5 px-1.5 text-xs cursor-pointer" title="Delete">
+                          🗑️
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
               ))}
@@ -1142,13 +1357,13 @@ function App() {
                   <div
                     key={file.id}
                     className={`file-tile fade-in bg-drive-surface border rounded-2xl overflow-hidden flex flex-col relative ${
-                      selected ? 'selected border-violet-500 shadow-[0_0_0_3px_rgba(124,58,237,0.15)]' : 'border-drive-border'
+                      selected ? 'selected border-teal-500 shadow-[0_0_0_3px_rgba(13,148,136,0.15)]' : 'border-drive-border'
                     }`}
                   >
                     {!isTrashView && (
                       <div
                         className={`select-check absolute top-2.5 left-2.5 w-[22px] h-[22px] rounded-[7px] border-2 border-white z-[5] flex items-center justify-center text-xs font-extrabold text-white cursor-pointer ${
-                          selected ? 'checked bg-violet-600 border-violet-600' : 'bg-white/75'
+                          selected ? 'checked bg-teal-600 border-teal-600' : 'bg-white/75'
                         }`}
                         onClick={(e) => { e.stopPropagation(); toggleSelect(file.id); }}
                       >
@@ -1176,7 +1391,7 @@ function App() {
                             if (e.key === 'Enter') saveRename(file.id);
                             if (e.key === 'Escape') setRenamingId(null);
                           }}
-                          className="w-full bg-chip-violet border border-violet-500 rounded-lg py-1.5 px-2.5 text-drive-text text-[13px] font-semibold"
+                          className="w-full bg-chip-teal border border-teal-500 rounded-lg py-1.5 px-2.5 text-drive-text text-[13px] font-semibold"
                         />
                       ) : (
                         <a
@@ -1233,16 +1448,56 @@ function App() {
                 <div
                   key={`folder-${folder.id}`}
                   className="file-row fade-in flex items-center py-2.5 px-3.5 rounded-xl gap-3"
-                  onClick={() => openFolder(folder)}
+                  onClick={() => !isTrashView && openFolder(folder)}
                 >
                   <span className="w-5" />
-                  <div className="text-lg w-[34px] h-[34px] flex items-center justify-center flex-none overflow-hidden rounded-[9px] cursor-pointer bg-chip-violet">📁</div>
+                  <div className={`text-lg w-[34px] h-[34px] flex items-center justify-center flex-none overflow-hidden rounded-[9px] cursor-pointer ${isTrashView ? 'bg-pink-100' : 'bg-chip-teal'}`}>📁</div>
                   <div className="flex-1 min-w-0">
-                    <span className="text-drive-text no-underline text-sm font-medium block whitespace-nowrap overflow-hidden text-ellipsis">{folder.name}</span>
+                    {renamingFolderId === folder.id ? (
+                      <input
+                        autoFocus
+                        value={renameFolderValue}
+                        onChange={(e) => setRenameFolderValue(e.target.value)}
+                        onClick={(e) => e.stopPropagation()}
+                        onBlur={() => saveRenameFolder(folder.id)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') saveRenameFolder(folder.id);
+                          if (e.key === 'Escape') setRenamingFolderId(null);
+                        }}
+                        className="w-full bg-chip-teal border border-teal-500 rounded-lg py-1.5 px-2.5 text-drive-text text-[13px] font-semibold"
+                      />
+                    ) : (
+                      <span className="text-drive-text no-underline text-sm font-medium block whitespace-nowrap overflow-hidden text-ellipsis">{folder.name}</span>
+                    )}
                   </div>
                   <span className="w-[90px] text-[13px] text-drive-muted">—</span>
-                  <span className="w-[140px] text-[13px] text-drive-muted">Folder</span>
-                  <div className="w-[96px]" />
+                  <span className="w-[140px] text-[13px] text-drive-muted">
+                    {isTrashView && folder.deleted_at ? new Date(folder.deleted_at).toLocaleDateString() : 'Folder'}
+                  </span>
+                  <div className="w-[96px] flex gap-1.5 justify-end">
+                    {isTrashView ? (
+                      <>
+                        <button onClick={(e) => { e.stopPropagation(); restoreFolder(folder.id); }} className="restore-btn bg-[rgba(30,27,46,0.55)] text-white border-none rounded-lg py-1.5 px-1.5 text-xs cursor-pointer" title="Restore">
+                          ♻️
+                        </button>
+                        <button onClick={(e) => { e.stopPropagation(); permanentlyDeleteFolder(folder.id); }} className="delete-btn bg-[rgba(30,27,46,0.55)] text-white border-none rounded-lg py-1.5 px-1.5 text-xs cursor-pointer" title="Delete forever">
+                          ❌
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button onClick={(e) => { e.stopPropagation(); toggleFolderStar(folder); }} className="star-btn bg-[rgba(30,27,46,0.55)] text-white border-none rounded-lg py-1.5 px-1.5 text-xs cursor-pointer" title={folder.starred ? 'Unstar' : 'Star'}>
+                          {folder.starred ? '⭐' : '☆'}
+                        </button>
+                        <button onClick={(e) => { e.stopPropagation(); startRenameFolder(folder); }} className="rename-btn bg-[rgba(30,27,46,0.55)] text-white border-none rounded-lg py-1.5 px-1.5 text-xs cursor-pointer" title="Rename">
+                          ✏️
+                        </button>
+                        <button onClick={(e) => { e.stopPropagation(); trashFolder(folder.id); }} className="delete-btn bg-[rgba(30,27,46,0.55)] text-white border-none rounded-lg py-1.5 px-1.5 text-xs cursor-pointer" title="Delete">
+                          🗑️
+                        </button>
+                      </>
+                    )}
+                  </div>
                 </div>
               ))}
 
@@ -1259,7 +1514,7 @@ function App() {
                     ) : (
                       <div
                         className={`w-5 h-5 rounded-md border-2 flex items-center justify-center text-[11px] font-extrabold text-white cursor-pointer flex-none ${
-                          selected ? 'checked bg-violet-600 border-violet-600' : 'border-drive-border'
+                          selected ? 'checked bg-teal-600 border-teal-600' : 'border-drive-border'
                         }`}
                         onClick={() => toggleSelect(file.id)}
                       >
@@ -1287,7 +1542,7 @@ function App() {
                             if (e.key === 'Enter') saveRename(file.id);
                             if (e.key === 'Escape') setRenamingId(null);
                           }}
-                          className="w-full bg-chip-violet border border-violet-500 rounded-lg py-1.5 px-2.5 text-drive-text text-[13px] font-semibold"
+                          className="w-full bg-chip-teal border border-teal-500 rounded-lg py-1.5 px-2.5 text-drive-text text-[13px] font-semibold"
                         />
                       ) : (
                         <a href={file.url || undefined} target="_blank" rel="noopener noreferrer" className="text-drive-text no-underline text-sm font-medium block whitespace-nowrap overflow-hidden text-ellipsis">

@@ -9,7 +9,7 @@
   --color-drive-border: #ECE6F7;
   --color-drive-text: #1E1B2E;
   --color-drive-muted: #6E6785;
-  --color-chip-violet: #F3E8FF;
+  --color-chip-teal: #ccfbf1;
   --color-chip-orange: #FFF1E6;
   --color-chip-green: #E7F9F1;
   --color-chip-blue: #E8F1FF;
@@ -17,8 +17,7 @@
 
 @layer utilities {
   .bg-drive-gradient {
-    background-image: linear-gradient(135deg, #7C3AED 0%, #C026D3 55%, #EC4899 100%);
-  }
+    background-image: linear-gradient(135deg, #0284c7 0%, #0d9488 100%);  }
 }
 
 :root {
